@@ -7,6 +7,7 @@ from rdkit import Chem
 class BackendType(str, Enum):
     MOLGPKA = "molgpka"
     PKALEARN = "pkalearn"
+    QUPKAKE = "qupkake"
 
 
 class LadderStep(TypedDict):
