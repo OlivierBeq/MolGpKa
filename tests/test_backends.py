@@ -119,9 +119,9 @@ class TestPkaLearnSpecific:
             assert "center" in step
             assert "pka" in step
 
-    def test_pkalearn_ladder_pka_values_increase_monotonically(self):
-        """Each deprotonation in the ladder should be harder than the previous."""
+    def test_pkalearn_ladder_pka_values_decrease_monotonically(self):
+        """Ladder walks from the most basic site (highest pKa) down to the most acidic."""
         model = PKaPredictor("pkalearn").model
         ladder, _ = model.predict(GLYCINE)
         pkas = [step["pka"] for step in ladder]
-        assert pkas == sorted(pkas)
+        assert pkas == sorted(pkas, reverse=True)

@@ -131,7 +131,12 @@ def _infer_round(model_wrapper, smiles, initial, ionization_states_in, config, a
 
 
 def predict_ladder(model_wrapper, original_smiles, config, allow_amphoteric=False) -> list[LadderStep]:
-    """Iterative macroscopic deprotonation sequence."""
+    """Iterative macroscopic deprotonation sequence.
+
+    Mirrors the original pKaLearn CLI behaviour: at each round the site with
+    the *highest* predicted pKa is deprotonated first (most basic site first),
+    producing a strictly descending pKa ladder.
+    """
     all_results = []
     initial = True
     curr_smiles = original_smiles
@@ -143,14 +148,15 @@ def predict_ladder(model_wrapper, original_smiles, config, allow_amphoteric=Fals
         )
         if not predicts: break
 
-        best_idx = predicts.index(min(predicts))
+        # Select the site with the HIGHEST pKa — the most basic site is
+        # deprotonated first as pH rises, matching the original CLI.
+        best_idx = predicts.index(max(predicts))
         best_center = centers[best_idx]
         best_pka = predicts[best_idx]
         best_smiles = smis[best_idx]
 
-        if best_smiles == curr_smiles:
-            break
-
+        # Record before the stall check: a single-site molecule's candidate
+        # SMILES can equal curr_smiles even though it's a real deprotonation.
         all_results.append(LadderStep(
             smiles=best_smiles,
             center=best_center,
@@ -158,17 +164,21 @@ def predict_ladder(model_wrapper, original_smiles, config, allow_amphoteric=Fals
         )
         )
 
+        if best_smiles == curr_smiles:
+            break
+
         curr_smiles = best_smiles
         curr_ion_states = states[best_idx]
         initial = False
 
-        if best_pka > 25:
+        # Guard against runaway ladders into very strong acid territory.
+        if best_pka < -25:
             break
 
     return all_results
 
 
-def compute_microstates(model_wrapper, mol, ph=7.4, ph_range=None, ph_step=None) -> MicrostateResult | dict[
+def compute_microstates(model_wrapper, mol, ph=7.4, ph_range=None, ph_step=None) -> dict[
     float, MicrostateResult]:
     """Build microstate distribution from the deprotonation ladder.
 

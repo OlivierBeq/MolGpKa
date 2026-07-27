@@ -11,19 +11,8 @@ from ...core.exceptions import ResourceNotFoundError
 
 
 def _map_ladder_center_to_neutral(step_mol, center_idx, neutral_mol):
-    """Map a ladder step's center atom index back to the corresponding atom index
-    in neutral_mol.
-
-    The ladder runs on a SMILES string that has been heavily rewritten by
-    ionizeN / addHs / parse_smiles — so step['center'] is an atom counter
-    in the mutated SMILES, NOT a valid index into neutral_mol.  step_mol,
-    however, is the RDKit mol built from that mutated SMILES, so center_idx
-    IS a valid index into step_mol.
-
-    Strategy: substructure-match step_mol onto neutral_mol (ignoring charges
-    and Hs, which differ between the two) to get the atom correspondence, then
-    look up where center_idx lands in neutral_mol.
-    """
+    """Map center_idx (an atom index into step_mol) to the matching atom index
+    in neutral_mol, via substructure match, ignoring charges and Hs."""
     # Build a charge-agnostic, H-stripped copy of step_mol for matching
     rw = Chem.RWMol(Chem.RemoveHs(step_mol))
     for atom in rw.GetAtoms():
@@ -116,13 +105,11 @@ class PkaLearnModel(BasePKaModel):
 
     @torch.no_grad()
     def predict(self, mol_or_smiles):
-        """
-        Runs the full iterative deprotonation ladder.
+        """Run the iterative deprotonation ladder.
 
-        Returns a tuple (ladder, starting_mol) where:
-          - ladder is a list of LadderStep dicts: [{'smiles', 'center', 'pka'}, ...]
-          - starting_mol is the RDKit Mol actually fed to the ladder (pre-protonated
-            when allow_amphoteric=True).
+        Returns (ladder, starting_mol): ladder is a list of LadderStep dicts
+        ({'smiles', 'center', 'pka'}); starting_mol is pre-protonated when
+        allow_amphoteric=True.
         """
         from .microstates import predict_ladder
 
@@ -134,15 +121,15 @@ class PkaLearnModel(BasePKaModel):
         mol_clean = Chem.RemoveHs(mol)
 
         if self.allow_amphoteric:
-            # Pre-protonate all neutral nitrogens so they enter the ladder at the top.
-            # Only aliphatic nitrogens with degree <= 3 are touched; aromatic ones are
-            # left unchanged (SetFormalCharge on an aromatic n breaks kekulization).
+            # Pre-protonate neutral, non-aromatic N so they enter the ladder at
+            # the top. Aromatic N excluded: protonating it can sanitize into a
+            # non-aromatic dication (e.g. imidazole) instead of a single proton.
             rw_mol = Chem.RWMol(mol_clean)
             patt = Chem.MolFromSmarts('[#7+0]')
             if patt:
                 for m in rw_mol.GetSubstructMatches(patt):
                     atom = rw_mol.GetAtomWithIdx(m[0])
-                    if atom.GetDegree() <= 3:
+                    if atom.GetDegree() <= 3 and not atom.GetIsAromatic():
                         atom.SetFormalCharge(1)
                         atom.SetNumExplicitHs(atom.GetNumExplicitHs() + 1)
             try:
@@ -153,9 +140,7 @@ class PkaLearnModel(BasePKaModel):
 
         # Non-canonical SMILES preserves the native node order perfectly.
         smiles_str = Chem.MolToSmiles(mol_clean, canonical=False)
-        # The ladder runs with allow_amphoteric=False: amphoteric second-pass inference
-        # is handled entirely in predict_pka, not inside the ladder, to avoid duplicate
-        # steps for the same atom.
+        # Amphoteric second pass happens in predict_pka, not here, to avoid duplicates.
         ladder = predict_ladder(self, smiles_str, self.config, allow_amphoteric=False)
         return ladder, mol_clean
 
@@ -181,18 +166,12 @@ class PkaLearnModel(BasePKaModel):
             if step_mol is None or ladder_idx >= step_mol.GetNumAtoms():
                 continue
 
-            # Map the ladder center back to an atom index in neutral_mol.
-            # step['center'] is an atom counter in the ladder's heavily-rewritten
-            # SMILES, NOT a valid index into neutral_mol; substructure matching
-            # recovers the correct correspondence.
+            # ladder_idx indexes step_mol, not neutral_mol; map it across.
             neutral_idx = _map_ladder_center_to_neutral(step_mol, ladder_idx, neutral_mol)
             if neutral_idx is None:
                 continue
 
-            # Classify by simulating the deprotonation on step_mol and reading the
-            # resulting formal charge:
-            #   fc < 0  -> deprotonation produced an anion  -> acidic pKa
-            #   fc >= 0 -> deprotonation produced a neutral -> basic pKa
+            # fc < 0 after deprotonation -> acidic pKa; fc >= 0 -> basic pKa.
             deprotonated = copy.deepcopy(step_mol)
             b_found, deprotonated, _ = from_acid_to_base(deprotonated, ladder_idx)
             if not b_found:
@@ -200,18 +179,14 @@ class PkaLearnModel(BasePKaModel):
 
             post_fc = deprotonated.GetAtomWithIdx(ladder_idx).GetFormalCharge()
             if post_fc < 0:
-                # Only record as acidic if this atom was not already seen as basic.
+                # Skip if already seen as basic; the amphoteric pass below handles it.
                 if neutral_idx not in base_pka:
                     acid_pka[neutral_idx] = pka
             else:
                 base_pka[neutral_idx] = pka
 
-        # --- Amphoteric extension ---
-        # Atoms classified as basic (e.g. NH3+ -> NH2 in the ladder) still carry a
-        # proton in their *neutral* form and can also act as acids (NH2 -> NH-).
-        # The ladder never reaches that second deprotonation.  When
-        # allow_amphoteric=True we run one extra inference pass per such atom,
-        # using the neutral molecule as the GNN input context.
+        # Amphoteric extension: a basic atom's neutral form may still carry a
+        # proton it can also lose (e.g. NH2 -> NH-), which the ladder never reaches.
         if self.allow_amphoteric and base_pka:
             for neutral_idx in list(base_pka.keys()):
                 if neutral_idx in acid_pka:
@@ -219,14 +194,14 @@ class PkaLearnModel(BasePKaModel):
 
                 atom = neutral_mol.GetAtomWithIdx(neutral_idx)
 
-                # Must carry a proton in its neutral form to act as an acid
+                # Must carry a proton in its neutral form to act as an acid.
                 if atom.GetTotalNumHs() == 0:
                     continue
-                # Only meaningful for classic amphoteric heteroatoms
+                # Only meaningful for classic amphoteric heteroatoms.
                 if atom.GetSymbol() not in ('N', 'O', 'S', 'P'):
                     continue
 
-                # Confirm deprotonation of the neutral atom yields an anion
+                # Confirm deprotonation of the neutral atom yields an anion.
                 mol_check = copy.deepcopy(neutral_mol)
                 b_found, mol_check, _ = from_acid_to_base(mol_check, neutral_idx)
                 if not b_found:
@@ -234,6 +209,8 @@ class PkaLearnModel(BasePKaModel):
                 if mol_check.GetAtomWithIdx(neutral_idx).GetFormalCharge() >= 0:
                     continue  # no anion formed -> not a genuine acidic site
 
+                # neutral_mol is already the acid-form input for this transition;
+                # adding another proton would re-evaluate base_pka's transition instead.
                 data = mol_to_graph(copy.deepcopy(neutral_mol), neutral_idx, self.config)
                 if data is None:
                     continue
