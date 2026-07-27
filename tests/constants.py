@@ -35,3 +35,13 @@ OSIMERTINIB = "CN1C=C(C2=CC=CC=C21)C3=NC(=NC=C3)NC4=C(C=C(C(=C4)NC(=O)C=C)N(C)CC
 CHEMBL5646830 = "CN1C=C(C2=CC=CC=C21)C3=NC(=NC=C3)NC4=CC=C(N(C)CCN(C)C)C=C4"
 
 ACETAMINOPHEN = "CC(=O)Nc1ccc(O)cc1"
+
+HISTIDINE = "NC(Cc1c[nH]cn1)C(=O)O"  # amphoteric, amine + imidazole + carboxyl
+PYRIDINE = "c1ccncc1"  # one basic ring N
+IMIDAZOLE = "c1cnc[nH]1"  # ring N-H (acidic) + ring N (basic)
+BENZENESULFONAMIDE = "NS(=O)(=O)c1ccccc1"
+METHANESULFONIC_ACID = "CS(=O)(=O)O"
+ETHANOLAMINE = "NCCO"
+PARA_AMINOPHENOL = "Nc1ccc(O)cc1"
+GUANIDINE = "NC(=N)N"
+TYROSINE = "NC(Cc1ccc(O)cc1)C(=O)O"  # amphoteric, amine + phenol + carboxyl
